@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>工程 PDF/影像修圖工具</title>
+    <!-- 引入 PDF.js 函式庫 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 0; overflow: hidden; background: #333; color: white; display: flex; flex-direction: column; height: 100vh; }
+        #toolbar { background: #222; padding: 10px; display: flex; flex-wrap: wrap; gap: 5px; border-bottom: 1px solid #444; z-index: 10; }
+        #canvas-container { flex-grow: 1; position: relative; overflow: auto; display: flex; justify-content: center; align-items: center; background: #1a1a1a; }
+        canvas { border: 1px solid #555; background: white; touch-action: none; }
+        #sidebar { width: 140px; background: #222; border-left: 1px solid #444; padding: 10px; font-size: 12px; }
+        .layer-item { padding: 8px; border: 1px solid #666; margin-bottom: 5px; cursor: pointer; background: #444; text-align: center; }
+        .layer-item.active { background: #007bff; border-color: #fff; }
+        button { background: #555; color: white; border: none; padding: 8px 10px; border-radius: 4px; cursor: pointer; font-size: 13px; }
+        button:active { background: #007bff; }
+        #loading { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(0,0,0,0.8); padding: 20px; border-radius: 10px; display: none; z-index: 100; }
+    </style>
+</head>
+<body>
+
+<div id="loading">處理中...</div>
+
+<div id="toolbar">
+    <button onclick="document.getElementById('fileInput').click()">讀取圖片/PDF</button>
+    <input type="file" id="fileInput" accept="image/*,application/pdf">
+    <button onclick="setTool('select')">圈選移動</button>
+    <button onclick="setTool('line')">標註尺寸</button>
+    <button onclick="rotateSelected()">旋轉</button>
+    <button onclick="mirrorSelected()">鏡像</button>
+    <button onclick="copySelected()">複製</button>
+    <button onclick="exportSVG()" style="background: #28a745;">儲存向量 (SVG)</button>
+</div>
+
+<div style="display: flex; flex: 1;">
+    <div id="canvas-container">
+        <canvas id="mainCanvas"></canvas>
+    </div>
+
+    <div id="sidebar">
+        <h4>圖層</h4>
+        <div id="layerList"></div>
+        <button onclick="addLayer()" style="width: 100%; margin-top: 10px;">+ 新增圖層</button>
+    </div>
+</div>
+
+<script>
+    // 初始化 PDF.js
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+    const canvas = document.getElementById('mainCanvas');
+    const ctx = canvas.getContext('2d');
+    const loading = document.getElementById('loading');
+    
+    let layers = [{ id: Date.now(), objects: [], visible: true, name: "背景" }];
+    let activeLayerIndex = 0;
+    let currentTool = 'select';
+    let selectedObj = null;
+    let isDrawing = false;
+    let startX, startY;
+
+    canvas.width = 800;
+    canvas.height = 1000;
+
+    // 檔案讀取邏輯
+    document.getElementById('fileInput').onchange = async function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+        
+        loading.style.display = 'block';
+        
+        if (file.type === "application/pdf") {
+            await loadPDF(file);
+        } else {
+            await loadImage(file);
+        }
+        
+        loading.style.display = 'none';
+        render();
+        updateLayerList();
+    };
+
+    async function loadImage(file) {
+        return new Promise((resolve) => {
+            const reader = new FileReader();
+            reader.onload = (f) => {
+                const img = new Image();
+                img.onload = () => {
+                    const obj = { type: 'image', img: img, x: 0, y: 0, w: img.width, h: img.height, angle: 0, mirror: 1 };
+                    layers[activeLayerIndex].objects.push(obj);
+                    canvas.width = Math.max(canvas.width, img.width);
+                    canvas.height = Math.max(canvas.height, img.height);
+                    resolve();
+                };
+                img.src = f.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+    }
+
+    async function loadPDF(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+        const page = await pdf.getPage(1); // 讀取第一頁
+        const viewport = page.getViewport({ scale: 2.0 }); // 提高解析度
+        
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCanvas.width = viewport.width;
+        tempCanvas.height = viewport.height;
+        
+        await page.render({ canvasContext: tempCtx, viewport: viewport }).promise;
+        
+        const img = new Image();
+        img.src = tempCanvas.toDataURL();
+        await new Promise(r => img.onload = r);
+        
+        const obj = { type: 'image', img: img, x: 0, y: 0, w: viewport.width, h: viewport.height, angle: 0, mirror: 1 };
+        layers[activeLayerIndex].objects.push(obj);
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+    }
+
+    function setTool(tool) { currentTool = tool; selectedObj = null; render(); }
+
+    function addLayer() {
+        layers.push({ id: Date.now(), objects: [], visible: true, name: "新圖層 " + layers.length });
+        activeLayerIndex = layers.length - 1;
+        updateLayerList();
+    }
+
+    function updateLayerList() {
+        const list = document.getElementById('layerList');
+        list.innerHTML = '';
+        layers.forEach((l, i) => {
+            const div = document.createElement('div');
+            div.className = `layer-item ${i === activeLayerIndex ? 'active' : ''}`;
+            div.innerText = l.name;
+            div.onclick = () => { activeLayerIndex = i; updateLayerList(); render(); };
+            list.appendChild(div);
+        });
+    }
+
+    function render() {
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        layers.forEach(layer => {
+            if (!layer.visible) return;
+            layer.objects.forEach(obj => {
+                ctx.save();
+                ctx.translate(obj.x + obj.w/2, obj.y + obj.h/2);
+                ctx.rotate(obj.angle * Math.PI / 180);
+                ctx.scale(obj.mirror, 1);
+                
+                if (obj.type === 'image') {
+                    ctx.drawImage(obj.img, -obj.w/2, -obj.h/2, obj.w, obj.h);
+                } else if (obj.type === 'line') {
+                    ctx.beginPath();
+                    ctx.moveTo(obj.x1 - (obj.x + obj.w/2), obj.y1 - (obj.y + obj.h/2));
+                    ctx.lineTo(obj.x2 - (obj.x + obj.w/2), obj.y2 - (obj.y + obj.h/2));
+                    ctx.strokeStyle = '#ff0000';
+                    ctx.lineWidth = 3;
+                    ctx.stroke();
+                    
+                    // 繪製端點箭頭
+                    ctx.fillStyle = '#ff0000';
+                    ctx.font = "bold 20px Arial";
+                    const dist = Math.round(Math.sqrt(Math.pow(obj.x2-obj.x1, 2) + Math.pow(obj.y2-obj.y1, 2)));
+                    ctx.fillText(`${dist} px`, 0, -10);
+                }
+
+                if (obj === selectedObj) {
+                    ctx.strokeStyle = '#00ffff';
+                    ctx.lineWidth = 2;
+                    ctx.strokeRect(-obj.w/2 - 5, -obj.h/2 - 5, obj.w + 10, obj.h + 10);
+                }
+                ctx.restore();
+            });
+        });
+    }
+
+    // 滑鼠與觸控事件
+    function getPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        return [clientX - rect.left, clientY - rect.top];
+    }
+
+    canvas.onmousedown = canvas.ontouchstart = (e) => {
+        const [mx, my] = getPos(e);
+        startX = mx; startY = my;
+        isDrawing = true;
+
+        if (currentTool === 'select') {
+            selectedObj = [...layers[activeLayerIndex].objects].reverse().find(obj => 
+                mx >= obj.x && mx <= obj.x + obj.w && my >= obj.y && my <= obj.y + obj.h
+            );
+        } else if (currentTool === 'line') {
+            const newLine = { type: 'line', x1: mx, y1: my, x2: mx, y2: my, x: mx, y: my, w: 10, h: 10, angle: 0, mirror: 1 };
+            layers[activeLayerIndex].objects.push(newLine);
+            selectedObj = newLine;
+        }
+        render();
+    };
+
+    canvas.onmousemove = canvas.ontouchmove = (e) => {
+        if (!isDrawing || !selectedObj) return;
+        const [mx, my] = getPos(e);
+
+        if (currentTool === 'select') {
+            selectedObj.x += (mx - startX);
+            selectedObj.y += (my - startY);
+            if(selectedObj.type === 'line') {
+                selectedObj.x1 += (mx - startX); selectedObj.y1 += (my - startY);
+                selectedObj.x2 += (mx - startX); selectedObj.y2 += (my - startY);
+            }
+            startX = mx; startY = my;
+        } else if (currentTool === 'line') {
+            selectedObj.x2 = mx;
+            selectedObj.y2 = my;
+            selectedObj.w = Math.abs(selectedObj.x2 - selectedObj.x1);
+            selectedObj.h = Math.abs(selectedObj.y2 - selectedObj.y1);
+            selectedObj.x = Math.min(selectedObj.x1, selectedObj.x2);
+            selectedObj.y = Math.min(selectedObj.y1, selectedObj.y2);
+        }
+        render();
+        e.preventDefault();
+    };
+
+    window.onmouseup = window.ontouchend = () => { isDrawing = false; };
+
+    function rotateSelected() { if(selectedObj) { selectedObj.angle += 90; render(); } }
+    function mirrorSelected() { if(selectedObj) { selectedObj.mirror *= -1; render(); } }
+    function copySelected() {
+        if(selectedObj) {
+            const copy = JSON.parse(JSON.stringify(selectedObj));
+            if(selectedObj.type === 'image') copy.img = selectedObj.img; // 圖片引用處理
+            copy.x += 30; copy.y += 30;
+            if(copy.type === 'line') { copy.x1 += 30; copy.y1 += 30; copy.x2 += 30; copy.y2 += 30; }
+            layers[activeLayerIndex].objects.push(copy);
+            render();
+        }
+    }
+
+    function exportSVG() {
+        let svg = `<svg width="${canvas.width}" height="${canvas.height}" xmlns="http://www.w3.org/2000/svg">`;
+        layers.forEach(l => {
+            l.objects.forEach(o => {
+                if(o.type === 'line') {
+                    svg += `<line x1="${o.x1}" y1="${o.y1}" x2="${o.x2}" y2="${o.y2}" stroke="red" stroke-width="3" />`;
+                }
+            });
+        });
+        svg += `</svg>`;
+        const blob = new Blob([svg], {type: 'image/svg+xml'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = 'engineering_drawing.svg'; a.click();
+    }
+
+    updateLayerList();
+</script>
+
+</body>
+</html>
