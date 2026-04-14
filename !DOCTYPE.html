@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>早午餐智慧排班工作台</title>
+    <style>
+        :root {
+            --primary: #4caf50;
+            --bg-color: #f4f7f6;
+            --danger: #f44336;
+            --leave: #9c27b0;
+            --warning: #ffeb3b;
+        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: var(--bg-color); margin: 0; padding: 20px; color: #333; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; background: white; padding: 15px 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); }
+        .container { display: flex; gap: 20px; align-items: flex-start; }
+        
+        /* 左側：員工池 */
+        .sidebar { width: 280px; background: white; padding: 15px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); position: sticky; top: 20px; }
+        .emp-card { background: #fff; padding: 12px; margin-bottom: 10px; border-radius: 6px; cursor: pointer; border: 2px solid #e0e0e0; transition: 0.2s; }
+        .emp-card:hover { border-color: #2196f3; box-shadow: 0 2px 8px rgba(33, 150, 243, 0.2); }
+        .emp-card.disabled { background: #f5f5f5; color: #9e9e9e; cursor: not-allowed; border-color: #eee; }
+        .emp-card.recommended { border-color: var(--primary); background: #e8f5e9; }
+        .skill-tags { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
+        .tag { font-size: 11px; background: #e3f2fd; color: #1565c0; padding: 3px 6px; border-radius: 4px; }
+        
+        /* 中央：排班畫布 */
+        .main-canvas { flex-grow: 1; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; min-width: 600px; }
+        th, td { border: 1px solid #e0e0e0; padding: 10px; text-align: center; vertical-align: middle; }
+        th { background-color: #fafafa; position: sticky; top: 0; }
+        .shift-title { background-color: #eceff1; font-weight: bold; text-align: left; padding-left: 15px; }
+        
+        /* 坑位樣式 */
+        .slot { border: 2px dashed #bdbdbd; border-radius: 6px; padding: 12px 8px; cursor: pointer; transition: 0.2s; min-height: 24px; font-size: 14px; color: #757575; background: #fafafa;}
+        .slot:hover { background-color: #e3f2fd; border-color: #2196f3; color: #1565c0; }
+        .slot.active { border: 2px solid #2196f3; background-color: #bbdefb; box-shadow: inset 0 0 5px rgba(33, 150, 243, 0.3); }
+        .slot.filled { background-color: #e8f5e9; border: 2px solid var(--primary); color: #2e7d32; font-weight: bold; }
+        
+        /* 防呆錯誤提示顏色 */
+        .slot.error-leave { background-color: #f3e5f5; border-color: var(--leave); color: var(--leave); }
+        .slot.error-skill { background-color: #fffde7; border-color: #fbc02d; color: #f57f17; }
+        .slot.error-double { background-color: #ffebee; border-color: var(--danger); color: var(--danger); }
+
+        .legend { display: flex; gap: 15px; font-size: 13px; margin-top: 15px; padding-top: 15px; border-top: 1px solid #eee; }
+        .legend-item span { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 5px; }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div>
+            <h2 style="margin: 0;">🍳 營運排班台 (2026年5月)</h2>
+            <p style="margin: 5px 0 0 0; color: #666; font-size: 14px;">點擊網格中的「坑位」，然後從左側選擇員工填入。</p>
+        </div>
+        <button style="padding: 10px 24px; background: var(--primary); color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 16px; font-weight: bold;">一鍵發布班表</button>
+    </div>
+
+    <div class="container">
+        <div class="sidebar">
+            <h3 style="margin-top: 0;">可派駐人員</h3>
+            <div id="employee-list">
+                </div>
+        </div>
+
+        <div class="main-canvas">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 150px;">時段 / 站線</th>
+                        <th>5/1 (五)</th>
+                        <th>5/2 (六)</th>
+                    </tr>
+                </thead>
+                <tbody id="schedule-body">
+                    </tbody>
+            </table>
+
+            <div class="legend">
+                <div class="legend-item"><span style="background: var(--primary);"></span> 正常排班</div>
+                <div class="legend-item"><span style="background: var(--leave);"></span> 錯誤：排到休假者</div>
+                <div class="legend-item"><span style="background: #fbc02d;"></span> 警告：職能不符</div>
+                <div class="legend-item"><span style="background: var(--danger);"></span> 錯誤：同日重複排班</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- 1. 模擬資料庫 (Database Simulation) ---
+        const db = {
+            employees: [
+                { id: "e1", name: "店長小明", type: "正職", skills: ["收銀", "飲料", "煎檯", "組裝區", "炒台/備料"] },
+                { id: "e2", name: "兼職小華", type: "兼職", skills: ["收銀", "組裝區"] },
+                { id: "e3", name: "兼職阿強", type: "兼職", skills: ["炒台/備料", "煎檯"] }
+            ],
+            leaves: [
+                { empId: "e2", date: "2026-05-02", reason: "自選休假" } // 小華 5/2 休假
+            ],
+            dates: ["2026-05-01", "2026-05-02"],
+            shifts: [
+                { name: "開早 (05:00-06:00)", stations: ["炒台/備料", "組裝區"] },
+                { name: "早餐尖峰 (07:30-09:30)", stations: ["收銀", "煎檯", "組裝區"] }
+            ]
+        };
+
+        // 儲存實際排班結果：格式 { slotId: empId }
+        let currentSchedule = {};
+        
+        // 記錄目前使用者點選了哪個坑位
+        let activeSlot = null; 
+
+        // --- 2. 介面渲染邏輯 (UI Rendering) ---
+        
+        // 渲染班表網格
+        function renderGrid() {
+            const tbody = document.getElementById("schedule-body");
+            let html = "";
+
+            db.shifts.forEach(shift => {
+                html += `<tr><td colspan="3" class="shift-title">${shift.name}</td></tr>`;
+                shift.stations.forEach(station => {
+                    html += `<tr><td><strong>${station}</strong></td>`;
+                    db.dates.forEach(date => {
+                        const slotId = `${date}_${shift.name}_${station}`;
+                        const isFilled = currentSchedule[slotId];
+                        const text = isFilled ? getEmpName(isFilled) : "+ 安排人員";
+                        const classNames = isFilled ? "slot filled" : "slot";
+                        
+                        html += `<td>
+                                    <div id="${slotId}" class="${classNames}" 
+                                         onclick="selectSlot('${slotId}', '${date}', '${station}')">
+                                         ${text}
+                                    </div>
+                                 </td>`;
+                    });
+                    html += `</tr>`;
+                });
+            });
+            tbody.innerHTML = html;
+            validateAllRules(); // 每次渲染完檢查防呆規則
+        }
+
+        // 渲染左側員工名單
+        function renderEmployees(targetDate = null, targetStation = null) {
+            const list = document.getElementById("employee-list");
+            let html = "";
+
+            db.employees.forEach(emp => {
+                let statusClass = "";
+                let statusText = "";
+                let isClickable = true;
+
+                // 檢查是否請假
+                const isOnLeave = db.leaves.some(l => l.empId === emp.id && l.date === targetDate);
+                // 檢查是否有技能
+                const hasSkill = emp.skills.includes(targetStation);
+
+                if (targetDate) {
+                    if (isOnLeave) {
+                        statusClass = "disabled";
+                        statusText = " (當日已畫休)";
+                        isClickable = false; // 畫休不給點擊
+                    } else if (targetStation && hasSkill) {
+                        statusClass = "recommended"; // 技能符合且沒休假，綠色推薦
+                    }
+                }
+
+                const tags = emp.skills.map(s => `<span class="tag">${s}</span>`).join("");
+                
+                html += `
+                    <div class="emp-card ${statusClass}" ${isClickable ? `onclick="assignEmployee('${emp.id}')"` : ''}>
+                        <div style="font-weight:bold; font-size:15px;">${emp.name} <span style="font-size:12px; color:#666; font-weight:normal;">${statusText}</span></div>
+                        <div style="font-size:12px; color:#888; margin-bottom:5px;">${emp.type}</div>
+                        <div class="skill-tags">${tags}</div>
+                    </div>
+                `;
+            });
+
+            if (!targetDate) {
+                list.innerHTML = `<div style="color:#888; font-size:14px; padding: 10px;">請先點擊右方表格中的「坑位」，系統會自動篩選適合的員工。</div>` + html;
+            } else {
+                list.innerHTML = html;
+            }
+        }
+
+        // --- 3. 互動與防呆邏輯 (Interaction & Validation) ---
+
+        // 點擊坑位
+        function selectSlot(slotId, date, station) {
+            // 移除所有坑位的 active 樣式
+            document.querySelectorAll('.slot').forEach(el => el.classList.remove('active'));
+            
+            // 標記目前坑位
+            activeSlot = { id: slotId, date: date, station: station };
+            document.getElementById(slotId).classList.add('active');
+
+            // 根據選中的時間與站點，過濾左側員工池
+            renderEmployees(date, station);
+        }
+
+        // 點擊員工填入坑位
+        function assignEmployee(empId) {
+            if (!activeSlot) {
+                alert("請先點選右方的排班坑位！");
+                return;
+            }
+            // 寫入排班紀錄
+            currentSchedule[activeSlot.id] = empId;
+            
+            // 清除選取狀態並重新渲染
+            activeSlot = null;
+            renderGrid();
+            renderEmployees(); // 重置員工池
+        }
+
+        // 執行所有防呆規則 (核心引擎)
+        function validateAllRules() {
+            // 先清除所有錯誤樣式
+            document.querySelectorAll('.slot').forEach(el => {
+                el.classList.remove('error-leave', 'error-skill', 'error-double');
+            });
+
+            const dailyAssigned = {}; // 紀錄每天誰上了幾個班，檢查重複排班用
+
+            for (const [slotId, empId] of Object.entries(currentSchedule)) {
+                const [date, shift, station] = slotId.split('_');
+                const slotEl = document.getElementById(slotId);
+                const emp = db.employees.find(e => e.id === empId);
+
+                // 規則 1：檢查請假 (Leave Rule)
+                const isOnLeave = db.leaves.some(l => l.empId === empId && l.date === date);
+                if (isOnLeave) {
+                    slotEl.classList.add('error-leave');
+                    slotEl.innerText = `${emp.name} (請假中)`;
+                    continue; // 發生重大錯誤，後續不處理，直接標紅
+                }
+
+                // 規則 2：檢查重複排班 (Double Booking Rule)
+                if (!dailyAssigned[date]) dailyAssigned[date] = [];
+                // 如果同一個人在同一天已經被排過別的班了
+                if (dailyAssigned[date].includes(empId)) {
+                    slotEl.classList.add('error-double');
+                    slotEl.innerText = `${emp.name} (重複排班)`;
+                } else {
+                    dailyAssigned[date].push(empId);
+                }
+
+                // 規則 3：檢查職能 (Skill Rule)
+                const hasSkill = emp.skills.includes(station);
+                if (!hasSkill && !slotEl.classList.contains('error-double')) {
+                    slotEl.classList.add('error-skill');
+                    slotEl.innerText = `${emp.name} (無技能)`;
+                }
+            }
+        }
+
+        // 工具函數：透過 ID 找名字
+        function getEmpName(id) {
+            const emp = db.employees.find(e => e.id === id);
+            return emp ? emp.name : "未知";
+        }
+
+        // --- 初始化啟動 ---
+        renderGrid();
+        renderEmployees();
+
+    </script>
+</body>
+</html>
